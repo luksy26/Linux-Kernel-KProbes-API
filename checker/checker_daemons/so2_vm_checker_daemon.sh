@@ -6,6 +6,10 @@ ASSIGNMENT0_CHECKER=/home/root/skels/assignments/0-list-checker
 ASSIGNMENT0_OUTPUT=/home/root/skels/0-list-output
 ASSIGNMENT0_FINISHED=/home/root/skels/0-list-finished
 
+ASSIGNMENT1_CHECKER=/home/root/skels/assignments/1-tracer-checker
+ASSIGNMENT1_OUTPUT=/home/root/skels/1-tracer-output
+ASSIGNMENT1_FINISHED=/home/root/skels/1-tracer-finished
+
 assign0_list()
 {
         cd $ASSIGNMENT0_CHECKER
@@ -14,6 +18,15 @@ assign0_list()
         cd -
 }
 
+assign1_tracer()
+{
+        cd $ASSIGNMENT1_CHECKER
+     	   sh _checker &> $ASSIGNMENT1_OUTPUT
+       	   echo FINISHED &> $ASSIGNMENT1_FINISHED
+        cd -
+}
+
+
 start()
 {
         local arg=$(cat /proc/cmdline | grep -o 'so2=[^ ]*' | cut -d= -f2)
@@ -21,6 +34,9 @@ start()
                 0-list)
                         assign0_list
                         ;;
+		1-tracer)
+			assign1_tracer
+			;;
                 *)
                         echo "Unknown option"
                         exit 0

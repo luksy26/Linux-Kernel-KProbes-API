@@ -27,6 +27,6 @@ build:
 checker:
     stage: test
     image:
-        name: gitlab.cs.pub.ro:5050/so2/0-list
+        name: gitlab.cs.pub.ro:5050/so2/1-tracer
     script:
         - ./checker/checker.sh $ASSIGNMENT

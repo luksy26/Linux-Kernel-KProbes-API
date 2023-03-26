@@ -2,11 +2,20 @@
 
 TIMEOUT=300 # 5 min
 SO2_WORKSPACE=/linux/tools/labs
+
 ASSIGNMENT0_MOD=list.ko
 ASSIGNMENT0_DIR=${SO2_WORKSPACE}/skels/assignments/0-list
 ASSIGNMENT0_CHECKER_DIR=${SO2_WORKSPACE}/skels/assignments/0-list-checker
 ASSIGNMENT0_OUTPUT=${SO2_WORKSPACE}/skels/0-list-output
 ASSIGNMENT0_FINISHED=${SO2_WORKSPACE}/skels/0-list-finished
+
+ASSIGNMENT1_MOD=tracer.ko
+ASSIGNMENT1_DIR=${SO2_WORKSPACE}/skels/assignments/1-tracer
+ASSIGNMENT1_CHECKER_DIR=${SO2_WORKSPACE}/skels/assignments/1-tracer-checker
+ASSIGNMENT1_OUTPUT=${SO2_WORKSPACE}/skels/1-tracer-output
+ASSIGNMENT1_FINISHED=${SO2_WORKSPACE}/skels/1-tracer-finished
+ASSIGNMENT1_HEADER_OVERWRITE=${SO2_WORKSPACE}/templates/assignments/1-tracer/tracer.h
+ASSIGNMENT1_CHECKER_AUX_LIST="${ASSIGNMENT1_CHECKER_DIR}/_helper/tracer_helper.ko"
 
 usage()
 {
@@ -50,7 +59,9 @@ run_checker()
 	local output=$4
 	local finished=$5
 	local assignment=$6
-	
+	local header_overwrite=$7
+	local aux_modules=$8
+
 	local module_path="${assignment_dir}/${assignment_mod}"
 
 	echo "Copying the contents of src/ into $assignment_dir"
@@ -61,8 +72,24 @@ run_checker()
 			echo "$assignment_mod shouldn't exists. Removing ${module_path}"
 			rm $module_path
 	fi
+
+	pushd $assignment_dir &> /dev/null
+		echo "Cleaning $assignment_dir => Will remove: *.o *.mod *.mod.c .*.cmd *.ko modules.order"
+		rm *.o &> /dev/null
+		rm *.mod &> /dev/null
+		rm *.mod.c &> /dev/null
+		rm .*.cmd &> /dev/null
+		rm *.ko &> /dev/null
+		rm modules.order &> /dev/null
+
+		if [[ $header_overwrite != "" ]]; then
+			echo "Overwrite from $header_overwrite"
+			cp $header_overwrite  .
+		fi
+	popd &> /dev/null
+
 		
-	pushd /linux/tools/labs &> /dev/null
+	pushd $SO2_WORKSPACE &> /dev/null
 		if [ -f $output ]; then
 			echo "Removing $output"
 			rm $output &> /dev/null
@@ -83,6 +110,15 @@ run_checker()
 		# copy *.ko in checker
 		echo "Copying $module_path into $checker_dir"
 		cp $module_path $checker_dir
+		
+		# copy aux modules in checker
+		if [[ $aux_modules != "" ]]; then
+			for mod in $aux_modules
+			do
+				echo "Copying $mod in $checker_dir"
+				cp $mod $checker_dir
+			done
+		fi
 
 		LINUX_ADD_CMDLINE="so2=$assignment" ./qemu/run-qemu.sh &> /dev/null &
 		
@@ -110,6 +146,11 @@ run_checker()
 case $1 in
 	0-list)
 		run_checker $ASSIGNMENT0_MOD $ASSIGNMENT0_DIR $ASSIGNMENT0_CHECKER_DIR $ASSIGNMENT0_OUTPUT $ASSIGNMENT0_FINISHED $1
+		;;
+	1-tracer)
+		run_checker $ASSIGNMENT1_MOD $ASSIGNMENT1_DIR $ASSIGNMENT1_CHECKER_DIR $ASSIGNMENT1_OUTPUT $ASSIGNMENT1_FINISHED $1 $ASSIGNMENT1_HEADER_OVERWRITE $ASSIGNMENT1_CHECKER_AUX_LIST
+
+
 		;;
 	*)
 		usage

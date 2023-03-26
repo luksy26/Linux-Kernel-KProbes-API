@@ -10,16 +10,16 @@ cd "$(dirname "$0")" || exit 1
 RED='\033[0;31m'
 NC='\033[0m'
 
-DEFAULT_IMAGE_NAME="so2/0-list"
+DEFAULT_IMAGE_NAME="so2/1-tracer"
 DEFAULT_TAG='latest'
 DEFAULT_REGISTRY='gitlab.cs.pub.ro:5050'
 
 SRC_DIR="$(realpath ./src)"
 CHECKER_BASE_DIR="$(realpath ./checker)"
-ASSIGNMENT_CHECKER_DIR="$(realpath ./checker/0-list-checker)"
+ASSIGNMENT_CHECKER_DIR="$(realpath ./checker/1-tracer-checker)"
 SO2_WORKSPACE=/linux/tools/labs
-ASSIGNMENT_MOUNT_DIR="${SO2_WORKSPACE}/skels/assignments/0-list"
-ASSIGNMENT_CHECKER_MOUNT_DIR="${SO2_WORKSPACE}/skels/assignments/0-list-checker"
+ASSIGNMENT_MOUNT_DIR="${SO2_WORKSPACE}/skels/assignments/1-tracer"
+ASSIGNMENT_CHECKER_MOUNT_DIR="${SO2_WORKSPACE}/skels/assignments/1-tracer-checker"
 MOUNT_PROJECT_DIRECTORY="/build/$USER/$(basename "$(pwd)")"
 
 #=============================================================================
