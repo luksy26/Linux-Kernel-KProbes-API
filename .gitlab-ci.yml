@@ -10,7 +10,7 @@ variables:
   CONTAINER_RELEASE_IMAGE: $CI_REGISTRY_IMAGE:latest
   DOCKER_HOST: tcp://docker:2375
   DOCKER_TLS_CERTDIR: ""
-  ASSIGNMENT: 0-list
+  ASSIGNMENT: 1-tracer
 
 
 build:
