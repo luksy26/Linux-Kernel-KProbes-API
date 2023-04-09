@@ -77,8 +77,13 @@ sh _checker
 
 ## Submiting the assignment
 1. Create a `*.zip` archive containing all the source files and headers of your solution and a `Kbuild` file that results in the `tracer.ko` module.
+> **Warning**
+> Please, keep in mind that you are not allowed to change the header inside the `/src` directory (`vmchecker-next` will overwrite this file, along with others).
+> Also, make sure the sources are in the root of the archive.
 2. Upload the archive on moodle in the section corresponding to the assignment.
 3. After a few minutes, you can see the checker results on the submission page, like in the following image.
+> **Warning**
+> Please make sure you get the score as feedback on the moodle page. Otherwise, something wrong happened in the checker and the assignment will not be graded.
 ![feedback](./img/feedback.png)
 
 Find the complete procedure for using `vmchecker-next` [here](https://github.com/systems-cs-pub-ro/vmchecker-next/wiki/Student-Handbook)
