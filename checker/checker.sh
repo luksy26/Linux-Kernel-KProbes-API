@@ -116,7 +116,8 @@ run_checker()
 
 		if [ ! -f $module_path ]; then
 			error_message $assignment_mod
-			exit 1
+			# exit successfully for vmchecker-next to process output
+			exit 0 # TODO: changeme 
 		fi
 	
 		# copy *.ko in checker
