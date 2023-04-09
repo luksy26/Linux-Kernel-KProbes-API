@@ -51,6 +51,18 @@ dump_output()
 
 }
 
+error_message()
+{
+	local output=$1
+	echo "<VMCK_NEXT_BEGIN>"
+	echo "Cannot find $assignment_mod"
+	echo -e "\t-Make sure you have the sources directly in the root of the archive."
+	echo -e "\t-Make sure you have not changed the header that comes with the code skeleton."
+	echo -e "\t-Make sure the assignment compiles in a similar environment as vmchecker-next by running './local.sh checker <assignment-name>'."
+	echo "After you have solved the problems, resubmit the assignment on moodle until the score appears as feedback, otherwise, the assignment will not be graded."
+	echo "<VMCK_NEXT_END>"
+}
+
 run_checker()
 {
 	local assignment_mod=$1
@@ -103,7 +115,7 @@ run_checker()
 		make build
 
 		if [ ! -f $module_path ]; then
-			echo "Cannot find $assignment_mod"
+			error_message $assignment_mod
 			exit 1
 		fi
 	
