@@ -17,5 +17,6 @@
 
 #define TRACER_ADD_PROCESS	_IOW(_IOC_WRITE, 42, pid_t)
 #define TRACER_REMOVE_PROCESS	_IOW(_IOC_WRITE, 43, pid_t)
+#define MAX_PROBES 32
 
 #endif /* TRACER_H_ */
