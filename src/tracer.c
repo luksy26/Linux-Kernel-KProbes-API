@@ -412,112 +412,151 @@ MODULE_LICENSE("GPL v2");
 // 	// TO DO CLEAN HASH
 // }
 
-// /proc entry used for tracking statistics
+#define MAX_PROBES 32
+#define PROC_HASH_SIZE 8
+#define MEM_HASH_SIZE 8
+#define TRACER_PROC_NAME "tracer"
+
+DEFINE_RWLOCK(lock); /**< Spinlock for protecting hashtable operations */
+
+// The /proc entry used for tracking statistics
 static struct proc_dir_entry *proc_tracer;
 
-// structure for keeping pid statistics data
+/* hashtable structure for keeping address-size pairs
 
-struct pid_stats_data {
-    unsigned int kmalloc_count;
-    unsigned int kmalloc_data;
+	'address' is the key
+	'size' is the value
+*/
+struct mem_data {
+	unsigned int address;
+	unsigned int size;
+	struct hlist_node hnode;
 };
 
+static struct mem_data *mem_data_alloc(unsigned int address, unsigned int size)
+{
+	struct mem_data *md;
+	
+	md = kmalloc(sizeof(*md), GFP_KERNEL);
+	if (md == NULL)
+		return NULL;
+	md->address = address;
+	md->size = size;
+	return md;
+}
+
+/* structure for keeping pid statistics data
+	*_count: stores number of times their respective
+			 functions were called
+	kmalloc_total and kfree_total: amount of memory allocated/freed by
+								   kmalloc and kfree
+	memory_dict: hashtable for keeping address-size pairs
+				 following kmalloc calls (defined above)
+*/
+struct pid_stats_data {
+    unsigned int kmalloc_count;
+    unsigned int kmalloc_total;
+	DECLARE_HASHTABLE(memory_dict, MEM_HASH_SIZE);
+};
+
+/* hashtable structure for keeping pid-stats pairs
+	'pid' is the key
+	'stats' is a pointer to the value (defined above)
+*/
 struct pid_data_hash {
     pid_t pid;
-    // struct pid_stats_data stats;
-    int value;
+    struct pid_stats_data *stats;
     struct hlist_node hnode;
 };
 
-DECLARE_HASHTABLE(pid_dict, MAX_PROBED_PROCESSES);
-
-// list for keeping tracked pids
-struct pid_data_list {
-	pid_t pid;
-	struct list_head list;
-};
-
-static struct list_head head; /**< Head of the linked list */
-
-DEFINE_RWLOCK(lock); /**< Spinlock for protecting list/hashtable operations */
-
-// allocate memory for apid_data_list structure
-static struct pid_data_list *pid_data_list_alloc(pid_t pid)
+static void mem_data_add(struct pid_data_hash *pdh, unsigned int address, unsigned int size)
 {
-	struct pid_data_list *pdl;
-
-	pdl = kmalloc(sizeof(*pdl), GFP_KERNEL);
-	if (pdl == NULL)
-		return NULL;
-	pdl->pid = pid;
-	return pdl;
-}
-
-// add a pid to the list (at the start)
-static void pid_data_list_add(pid_t pid)
-{
-	struct pid_data_list *pdl;
-
-	pdl = pid_data_list_alloc(pid);
-	if (pdl == NULL)
+	struct mem_data *md;
+	
+	md = mem_data_alloc(address, size);
+	if (md == NULL)
 		return;
 	write_lock(&lock);
-	list_add(&pdl->list, &head);
+	hash_add(pdh->stats->memory_dict, &md->hnode, address);
 	write_unlock(&lock);
 }
 
-// delete a pid from the list (all instances)
-static void pid_data_list_delete(pid_t pid)
+static void mem_data_delete(struct pid_data_hash *pdh, unsigned int address)
 {
-	struct list_head *p, *q;
-	struct pid_data_list *pdl;
+	struct mem_data *md;
+	struct hlist_node *q;
 
 	write_lock(&lock);
-	list_for_each_safe (p, q, &head) {
-		pdl = list_entry(p, struct pid_data_list, list);
-		if (pdl->pid == pid) {
-			list_del(p);
-			kfree(pdl);
+	hash_for_each_possible_safe(pdh->stats->memory_dict, md, q, hnode, address) {
+		if (md->address == address) {
+			hash_del(&md->hnode);
+			// TODO free
+			break;
 		}
 	}
 	write_unlock(&lock);
 }
 
-static void pid_data_list_purge(void)
+static struct pid_data_hash *pid_data_hash_alloc(pid_t pid)
 {
-	struct list_head *p, *q;
-	struct pid_data_list *pdl;
+	struct pid_data_hash *pdh;
+
+	pdh = kmalloc(sizeof(*pdh), GFP_KERNEL);
+	if (pdh == NULL)
+		return NULL;
+	pdh->pid = pid;
+	pdh->stats = kmalloc(sizeof(*(pdh->stats)), GFP_KERNEL);
+	pdh->stats->kmalloc_count = pid - 50;
+	pdh->stats->kmalloc_total = pid - 20;
+	hash_init(pdh->stats->memory_dict);
+	mem_data_add(pdh, 1000, 150);
+	mem_data_add(pdh, 1500, 300);
+	return pdh;
+}
+
+DECLARE_HASHTABLE(pid_dict, PROC_HASH_SIZE);
+
+static void pid_data_hash_add(pid_t pid)
+{
+	struct pid_data_hash *pdh;
+
+	pdh = pid_data_hash_alloc(pid);
+	if (pdh == NULL)
+		return;
+	write_lock(&lock);
+	hash_add(pid_dict, &pdh->hnode, pid);
+	write_unlock(&lock);
+}
+
+static void pid_data_hash_delete(pid_t pid)
+{
+	struct pid_data_hash *pdh;
+	struct hlist_node *q;
 
 	write_lock(&lock);
-	list_for_each_safe (p, q, &head) {
-		pdl = list_entry(p, struct pid_data_list, list);
-		list_del(p);
-		kfree(pdl);
+	hash_for_each_possible_safe(pid_dict, pdh, q, hnode, pid) {
+		if (pdh->pid == pid) {
+			hash_del(&pdh->hnode);
+			// TODO free
+			break;
+		}
 	}
 	write_unlock(&lock);
 }
 
-static void pid_data_hash_add(pid_t key, int value)
-{
-    struct pid_data_hash *pdh, *new_entry;
-    struct hlist_node *q;
+// static void pid_data_list_purge(void)
+// {
+// 	struct list_head *p, *q;
+// 	struct pid_data_list *pdl;
 
-    unsigned int hash = hash_32(key, 32);
-
-    hash_for_each_possible_safe(pid_dict, pdh, q, hnode, hash) {
-        if (pdh->pid == key) {
-            pdh->value += value;
-            return;
-        }
-    }
-    new_entry = kmalloc(sizeof(*new_entry), GFP_KERNEL);
-    if (new_entry == NULL) {
-        return;
-    }
-    new_entry->pid = key;
-    new_entry->value = value;
-    hash_add(pid_dict, &new_entry->hnode, hash);
-}
+// 	write_lock(&lock);
+// 	list_for_each_safe (p, q, &head) {
+// 		pdl = list_entry(p, struct pid_data_list, list);
+// 		list_del(p);
+// 		kfree(pdl);
+// 	}
+// 	write_unlock(&lock);
+// }
 
 // IOCTL function
 static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -525,13 +564,10 @@ static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case TRACER_ADD_PROCESS:
 		pr_info("ADD: cmd is %u, arg is %lu\n", cmd, arg);
-        pid_data_list_add((pid_t)arg);
-
 		break;
 
 	case TRACER_REMOVE_PROCESS:
 		pr_info("REMOVE: cmd is %u, arg is %lu\n", cmd, arg);
-        pid_data_list_delete((pid_t)arg);
 		break;
 
 	default:
@@ -555,15 +591,20 @@ static struct miscdevice tracer_dev = {
 // Procfs file functions
 static int proc_tracer_show(struct seq_file *m, void *v)
 {
-    int bucket;
     struct pid_data_hash *pdh;
+	struct mem_data *md;
+	struct hlist_node *q, *q2;
+	unsigned int bucket, bucket2;
 
 	seq_printf(m, "hash header\n");
 
-    for (bucket = 0; bucket < ARRAY_SIZE(pid_dict); ++bucket) {
-        hash_for_each_possible(pid_dict, pdh, hnode, bucket) {
-            seq_printf(m, "pid is %u, value is %d\n", pdh->pid, pdh->value);
-        }
+    hash_for_each_safe(pid_dict, bucket, q, pdh, hnode) {
+        seq_printf(m, "pid is %u, stats are count: %d and total: %d\n",
+			pdh->pid, pdh->stats->kmalloc_count, pdh->stats->kmalloc_total);
+		seq_printf(m, "now going through memory hash: ");
+		hash_for_each_safe(pdh->stats->memory_dict, bucket2, q2, md, hnode) {
+			seq_printf(m, "address is %u, size is: %u\n", md->address, md->size);
+		}
     }
 	return 0;
 }
@@ -583,10 +624,7 @@ static int tracer_init(void)
 {
 	int ret;
 
-    // initialize pid list
-    INIT_LIST_HEAD(&head);
-
-    // initialize hash table
+    // initialize pid hash table
     hash_init(pid_dict);
 
 	// Register device
@@ -603,11 +641,9 @@ static int tracer_init(void)
 		goto cleanup_proc_create;
 	}
 
-    pid_data_hash_add(100, 3);
-    pid_data_hash_add(101, 4);
-    pid_data_hash_add(102, 5);
-    pid_data_hash_add(100, 2);
-    pid_data_hash_add(102, 2);
+    pid_data_hash_add(100);
+	pid_data_hash_add(101);
+	pid_data_hash_add(102);
 
 	return 0;
 
@@ -629,8 +665,7 @@ static void tracer_exit(void)
 	// Remove /proc/tracer file
 	proc_remove(proc_tracer);
 
-    // Free memory used for pid list
-    pid_data_list_purge();
+	// TODO Clean up pid_dit
 }
 
 module_init(tracer_init);
