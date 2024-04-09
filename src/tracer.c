@@ -17,27 +17,6 @@ MODULE_DESCRIPTION("Kprobe based tracer");
 MODULE_AUTHOR("LAZAROIU LUCAS <lucas.lazaroiu@stud.acs.upb.ro");
 MODULE_LICENSE("GPL v2");
 
-// Structures to store surveillance data
-// struct process_data {
-//     pid_t pid;
-//     unsigned int kmalloc_count;
-//     unsigned int kfree_count;
-//     size_t kmalloc_mem_total;
-//     size_t kfree_mem_total;
-//     unsigned int schedule_count;
-//     unsigned int up_count;
-//     unsigned int down_count;
-//     unsigned int lock_count;
-//     unsigned int unlock_count;
-//     struct hlist_node hlist;
-// };
-
-// DEFINE_HASHTABLE(process_table, 8);
-// static DEFINE_MUTEX(process_table_lock);
-// static LIST_HEAD(tracked_processes);
-
-// static struct proc_dir_entry *proc_tracer;
-
 // static int kmalloc_probe_entry_handler(struct kretprobe_instance *p, struct pt_regs *regs) {
 // 	return 0;
 // }
@@ -256,17 +235,6 @@ MODULE_LICENSE("GPL v2");
 //     return 0;
 // }
 
-// Define file operations for /dev/tracer
-// static const struct file_operations tracer_fops = {
-//     .unlocked_ioctl = tracer_ioctl,
-// };
-
-// Define tracer device
-// static struct miscdevice tracer_dev = {
-//     .minor = TRACER_DEV_MINOR,
-//     .name = TRACER_DEV_NAME,
-//     .fops = &tracer_fops,
-// };
 
 // Procfs file functions
 // static int proc_tracer_show(struct seq_file *m, void *v) {
@@ -284,16 +252,6 @@ MODULE_LICENSE("GPL v2");
 //     //mutex_unlock(&process_table_lock);
 //     return 0;
 // }
-
-// static int proc_tracer_open(struct inode *inode, struct file *file) {
-//     return single_open(file, proc_tracer_show, NULL);
-// }
-
-// static const struct proc_ops proc_tracer_fops = {
-//     .proc_open = proc_tracer_open,
-//     .proc_read = seq_read,
-//     .proc_release = single_release,
-// };
 
 // static int tracer_init(void) {
 
@@ -401,13 +359,7 @@ MODULE_LICENSE("GPL v2");
 
 //     // Remove /proc/tracer file
 //     remove_proc_entry("tracer", NULL);
-
-// 	// Cleanup tracked processes
-// 	// struct process_data *pdata, *tmp;
-//     // list_for_each_entry_safe(pdata, tmp, &tracked_processes, hlist) {
-//     //     list_del(&pdata->hlist);
-//     //     kfree(pdata);
-//     // }
+//     }
 
 // 	// TO DO CLEAN HASH
 // }
