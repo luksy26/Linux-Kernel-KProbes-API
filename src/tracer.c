@@ -17,39 +17,6 @@ MODULE_DESCRIPTION("Kprobe based tracer");
 MODULE_AUTHOR("LAZAROIU LUCAS <lucas.lazaroiu@stud.acs.upb.ro");
 MODULE_LICENSE("GPL v2");
 
-// static int tracer_init(void) {
-
-// 	int ret;
-
-// 	hash_init(process_table);
-
-// 	 // Register kretprobes
-//     ret = register_kretprobe(&kmalloc_probe);
-//     if (ret < 0) {
-//         pr_err("register_kretprobe kmalloc failed\n");
-//         goto cleanup_kmalloc_probe;
-//     }
-
-//     ret = register_kretprobe(&kfree_probe);
-//     if (ret < 0) {
-//         pr_err("register_kretprobe kfree failed\n");
-//         goto cleanup_kfree_probe;
-//     }
-
-// cleanup_kfree_probe:
-//     unregister_kretprobe(&kfree_probe);
-// cleanup_kmalloc_probe:
-//     unregister_kretprobe(&kmalloc_probe);
-
-
-// static void tracer_exit(void)
-// {
-// 	// Unregister kretprobes
-//     unregister_kretprobe(&kmalloc_probe);
-//     unregister_kretprobe(&kfree_probe);
-//     }
-// }
-
 #define MAX_PROBES 64
 #define PROC_HASH_SIZE 8
 #define MEM_HASH_SIZE 8
@@ -282,7 +249,7 @@ static int kmalloc_probe_handler(struct kretprobe_instance *p, struct pt_regs *r
 	struct reg_data *data = (struct reg_data *)p->data;
 
 	if (data->size == -1)
-		// entry_handler told us to not instrument this process
+		// entry_handler told us not to instrument this process
 		return 0;
 
 	// increase the call count and total memory
