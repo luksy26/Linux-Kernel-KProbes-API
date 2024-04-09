@@ -490,7 +490,7 @@ static void mem_data_delete(struct pid_data_hash *pdh, unsigned int address)
 	hash_for_each_possible_safe(pdh->stats->memory_dict, md, q, hnode, address) {
 		if (md->address == address) {
 			hash_del(&md->hnode);
-			// TODO free
+			kfree(md);
 			break;
 		}
 	}
@@ -509,8 +509,9 @@ static struct pid_data_hash *pid_data_hash_alloc(pid_t pid)
 	pdh->stats->kmalloc_count = pid - 50;
 	pdh->stats->kmalloc_total = pid - 20;
 	hash_init(pdh->stats->memory_dict);
-	mem_data_add(pdh, 1000, 150);
-	mem_data_add(pdh, 1500, 300);
+	mem_data_add(pdh, pdh->pid + 1000, pdh->pid + 150);
+	mem_data_add(pdh, pdh->pid + 1500, pdh->pid + 300);
+	mem_data_delete(pdh, pdh->pid + 1000);
 	return pdh;
 }
 
@@ -528,6 +529,19 @@ static void pid_data_hash_add(pid_t pid)
 	write_unlock(&lock);
 }
 
+static void pid_data_hash_free(struct pid_data_hash *pdh)
+{
+	struct mem_data *md;
+	struct hlist_node *q;
+	unsigned int bucket;
+	hash_for_each_safe(pdh->stats->memory_dict, bucket, q, md, hnode) {
+		hash_del(&md->hnode);
+		kfree(md);
+	}
+	kfree(pdh->stats);
+	kfree(pdh);
+}
+
 static void pid_data_hash_delete(pid_t pid)
 {
 	struct pid_data_hash *pdh;
@@ -537,26 +551,26 @@ static void pid_data_hash_delete(pid_t pid)
 	hash_for_each_possible_safe(pid_dict, pdh, q, hnode, pid) {
 		if (pdh->pid == pid) {
 			hash_del(&pdh->hnode);
-			// TODO free
+			pid_data_hash_free(pdh);
 			break;
 		}
 	}
 	write_unlock(&lock);
 }
 
-// static void pid_data_list_purge(void)
-// {
-// 	struct list_head *p, *q;
-// 	struct pid_data_list *pdl;
+static void pid_data_purge_hash(void)
+{
+	struct pid_data_hash *pdh;
+	struct hlist_node *q;
+	unsigned int bucket;
 
-// 	write_lock(&lock);
-// 	list_for_each_safe (p, q, &head) {
-// 		pdl = list_entry(p, struct pid_data_list, list);
-// 		list_del(p);
-// 		kfree(pdl);
-// 	}
-// 	write_unlock(&lock);
-// }
+	write_lock(&lock);
+	hash_for_each_safe(pid_dict, bucket, q, pdh, hnode) {
+		hash_del(&pdh->hnode);
+		pid_data_hash_free(pdh);
+	}
+	write_unlock(&lock);
+}
 
 // IOCTL function
 static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -601,7 +615,7 @@ static int proc_tracer_show(struct seq_file *m, void *v)
     hash_for_each_safe(pid_dict, bucket, q, pdh, hnode) {
         seq_printf(m, "pid is %u, stats are count: %d and total: %d\n",
 			pdh->pid, pdh->stats->kmalloc_count, pdh->stats->kmalloc_total);
-		seq_printf(m, "now going through memory hash: ");
+		seq_printf(m, "now going through memory hash:\n");
 		hash_for_each_safe(pdh->stats->memory_dict, bucket2, q2, md, hnode) {
 			seq_printf(m, "address is %u, size is: %u\n", md->address, md->size);
 		}
@@ -644,6 +658,7 @@ static int tracer_init(void)
     pid_data_hash_add(100);
 	pid_data_hash_add(101);
 	pid_data_hash_add(102);
+	pid_data_hash_delete(101);
 
 	return 0;
 
@@ -665,7 +680,8 @@ static void tracer_exit(void)
 	// Remove /proc/tracer file
 	proc_remove(proc_tracer);
 
-	// TODO Clean up pid_dit
+	// Free up memory allocated in pid_dict
+	pid_data_purge_hash();
 }
 
 module_init(tracer_init);
