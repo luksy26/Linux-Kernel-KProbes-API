@@ -20,8 +20,8 @@ MODULE_AUTHOR("LAZAROIU LUCAS <lucas.lazaroiu@stud.acs.upb.ro");
 MODULE_LICENSE("GPL v2");
 
 #define MAX_PROBES 64
-#define PROC_HASH_SIZE 8
-#define MEM_HASH_SIZE 8
+#define PROC_HASH_SIZE 12
+#define MEM_HASH_SIZE 12
 #define TRACER_PROC_NAME "tracer"
 
 /* The header used for displaying the /proc/tracer file with process statistics.
@@ -353,19 +353,17 @@ static void pid_data_purge_hash(void)
  */
 struct reg_data {
 	struct pid_data_hash *pdh; /**< hashtable entry for current pid */
-	unsigned int address; /**< used by the kfree handlers */
 	unsigned int size; /**< used by the kmalloc handlers */
 };
 
 // Handler functions for kretprobes
 
-static int kmalloc_probe_entry_handler(struct kretprobe_instance *p,
-				       struct pt_regs *regs)
+static int kmalloc_probe_entry_handler(struct kretprobe_instance *p, struct pt_regs *regs)
 {
 	struct reg_data *data = (struct reg_data *)p->data;
 	struct pid_data_hash *pdh;
 
-	// blacklist the probe handler as we don't want recursive instrumentation
+	// Blacklist the probe handler as we don't want recursive instrumentation
 	if (current->pid == current_module_pid) {
 		data->size = 0;
 		return 0;
@@ -373,19 +371,18 @@ static int kmalloc_probe_entry_handler(struct kretprobe_instance *p,
 
 	pdh = pid_data_hash_search(current->pid);
 	if (pdh == NULL) {
-		// don't instrument anything, we are not tracking this process
+		// Don't instrument anything, we are not tracking this process
 		data->size = 0;
 		return 0;
 	}
 
-	// data to be passed to the regular handler
-	data->size = regs->ax; /** the argument received by kmalloc */
+	// Data to be passed to the regular handler
+	data->size = regs->ax; /** The argument received by kmalloc */
 	data->pdh = pdh;
 	return 0;
 }
 
-static int kmalloc_probe_handler(struct kretprobe_instance *p,
-				 struct pt_regs *regs)
+static int kmalloc_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
 {
 	unsigned int address;
 	struct reg_data *data = (struct reg_data *)p->data;
@@ -394,59 +391,136 @@ static int kmalloc_probe_handler(struct kretprobe_instance *p,
 		// entry_handler told us not to instrument this process
 		return 0;
 
-	// increase the call count and total memory
+	// Increase the call count and total memory
 	++data->pdh->stats->kmalloc_count;
 	data->pdh->stats->kmalloc_total += data->size;
 
-	// add an entry to the address-size memory hashtable
+	// Add an entry to the address-size memory hashtable
 	address = regs_return_value(regs);
 	mem_data_add(data->pdh, address, data->size);
-
+	pr_info("Allocating %u at address %u\n", data->size, address);
 	return 0;
 }
 
-static int kfree_probe_entry_handler(struct kretprobe_instance *p,
-				     struct pt_regs *regs)
+static int kfree_probe_entry_handler(struct kretprobe_instance *p, struct pt_regs *regs)
 {
-	struct reg_data *data = (struct reg_data *)p->data;
 	struct pid_data_hash *pdh;
+	unsigned int address, size;
 
-	// blacklist the probe handler as we don't want recursive instrumentation
-	if (current->pid == current_module_pid) {
-		data->address = 0;
+	// Blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid)
 		return 0;
-	}
 
 	pdh = pid_data_hash_search(current->pid);
-	if (pdh == NULL) {
-		// don't instrument anything, we are not tracking this process
-		data->address = 0;
+	if (pdh == NULL)
+		// Don't instrument anything, we are not tracking this process
 		return 0;
-	}
-	data->address = regs->ax;
-	data->pdh = pdh;
+
+	// Increase the kfree call count
+	++pdh->stats->kfree_count;
+
+	address = regs->ax;
+	/* Remove the address-size entry in the pid's
+	 * memory hashtable (as it's been freed)
+	 */
+	size = mem_data_delete(pdh, address);
+	// Increase the amount of freed memory for current pid
+	pdh->stats->kfree_total += size;
 	return 0;
 }
 
-static int kfree_probe_handler(struct kretprobe_instance *p,
-			       struct pt_regs *regs)
+static int schedule_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
 {
-	struct reg_data *data = (struct reg_data *)p->data;
-	unsigned int size;
+	struct pid_data_hash *pdh;
 
-	if (data->address == 0)
-		// entry_handler told us not to instrument this process
+	// Blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid)
 		return 0;
 
-	// increase the kfree call count
-	++data->pdh->stats->kfree_count;
+	pdh = pid_data_hash_search(current->pid);
+	if (pdh == NULL)
+		// Don't instrument anything, we are not tracking this process
+		return 0;
 
-	/* remove the address-size entry in the pid's
-	 * memory hashtable (as it's been freed)
-	 */
-	size = mem_data_delete(data->pdh, data->address);
-	// increase the amount of freed memory for current pid
-	data->pdh->stats->kfree_total += size;
+	// Increase the schedule call count
+	++pdh->stats->sched_count;
+
+	return 0;
+}
+
+static int up_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
+{
+	struct pid_data_hash *pdh;
+
+	// Blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid)
+		return 0;
+
+	pdh = pid_data_hash_search(current->pid);
+	if (pdh == NULL)
+		// Don't instrument anything, we are not tracking this process
+		return 0;
+
+	// Increase the up call count
+	++pdh->stats->up_count;
+
+	return 0;
+}
+
+static int down_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
+{
+	struct pid_data_hash *pdh;
+
+	// Blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid)
+		return 0;
+
+	pdh = pid_data_hash_search(current->pid);
+	if (pdh == NULL)
+		// Don't instrument anything, we are not tracking this process
+		return 0;
+
+	// Increase the down call count
+	++pdh->stats->down_count;
+
+	return 0;
+}
+
+static int mutex_lock_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
+{
+	struct pid_data_hash *pdh;
+
+	// Blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid)
+		return 0;
+
+	pdh = pid_data_hash_search(current->pid);
+	if (pdh == NULL)
+		// Don't instrument anything, we are not tracking this process
+		return 0;
+
+	// Increase the lock call count
+	++pdh->stats->lock_count;
+
+	return 0;
+}
+
+static int mutex_unlock_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
+{
+	struct pid_data_hash *pdh;
+
+	// Blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid)
+		return 0;
+
+	pdh = pid_data_hash_search(current->pid);
+	if (pdh == NULL)
+		// Don't instrument anything, we are not tracking this process
+		return 0;
+
+	// Increase the unlock call count
+	++pdh->stats->unlock_count;
+
 	return 0;
 }
 
@@ -454,7 +528,11 @@ static int kfree_probe_handler(struct kretprobe_instance *p,
 NOKPROBE_SYMBOL(kmalloc_probe_entry_handler);
 NOKPROBE_SYMBOL(kmalloc_probe_handler);
 NOKPROBE_SYMBOL(kfree_probe_entry_handler);
-NOKPROBE_SYMBOL(kfree_probe_handler);
+NOKPROBE_SYMBOL(schedule_probe_handler);
+NOKPROBE_SYMBOL(up_probe_handler);
+NOKPROBE_SYMBOL(down_probe_handler);
+NOKPROBE_SYMBOL(mutex_lock_probe_handler);
+NOKPROBE_SYMBOL(mutex_unlock_probe_handler);
 
 // Define kretprobes
 static struct kretprobe kmalloc_probe = {
@@ -472,8 +550,46 @@ static struct kretprobe kfree_probe = {
 		.symbol_name = "kfree",
 	},
 	.entry_handler = kfree_probe_entry_handler,
-	.handler = kfree_probe_handler,
-	.data_size = sizeof(struct reg_data),
+	.maxactive = MAX_PROBES,
+};
+
+static struct kretprobe schedule_probe = {
+	.kp = {
+		.symbol_name = "schedule",
+	},
+	.handler = schedule_probe_handler,
+	.maxactive = MAX_PROBES,
+};
+
+static struct kretprobe up_probe = {
+	.kp = {
+		.symbol_name = "up",
+	},
+	.handler = up_probe_handler,
+	.maxactive = MAX_PROBES,
+};
+
+static struct kretprobe down_probe = {
+	.kp = {
+		.symbol_name = "down_interruptible",
+	},
+	.handler = down_probe_handler,
+	.maxactive = MAX_PROBES,
+};
+
+static struct kretprobe mutex_lock_probe = {
+	.kp = {
+		.symbol_name = "mutex_lock_nested",
+	},
+	.handler = mutex_lock_probe_handler,
+	.maxactive = MAX_PROBES,
+};
+
+static struct kretprobe mutex_unlock_probe = {
+	.kp = {
+		.symbol_name = "mutex_unlock",
+	},
+	.handler = mutex_unlock_probe_handler,
 	.maxactive = MAX_PROBES,
 };
 
@@ -590,6 +706,36 @@ static int tracer_init(void)
 		goto cleanup_kfree_probe;
 	}
 
+	ret = register_kretprobe(&schedule_probe);
+	if (ret) {
+		pr_err("register_kretprobe schedule failed\n");
+		goto cleanup_schedule_probe;
+	}
+
+	ret = register_kretprobe(&up_probe);
+	if (ret) {
+		pr_err("register_kretprobe up failed\n");
+		goto cleanup_up_probe;
+	}
+
+	ret = register_kretprobe(&down_probe);
+	if (ret) {
+		pr_err("register_kretprobe down failed\n");
+		goto cleanup_down_probe;
+	}
+
+	ret = register_kretprobe(&mutex_lock_probe);
+	if (ret) {
+		pr_err("register_kretprobe mutex_lock failed\n");
+		goto cleanup_mutex_lock_probe;
+	}
+
+	ret = register_kretprobe(&mutex_unlock_probe);
+	if (ret) {
+		pr_err("register_kretprobe mutex_unlock failed\n");
+		goto cleanup_mutex_unlock_probe;
+	}
+
 	return 0;
 
 // Cleanup after errors
@@ -604,6 +750,21 @@ cleanup_kmalloc_probe:
 	return -ENOMEM;
 cleanup_kfree_probe:
 	unregister_kretprobe(&kfree_probe);
+	return -ENOMEM;
+cleanup_schedule_probe:
+	unregister_kretprobe(&schedule_probe);
+	return -ENOMEM;
+cleanup_up_probe:
+	unregister_kretprobe(&up_probe);
+	return -ENOMEM;
+cleanup_down_probe:
+	unregister_kretprobe(&down_probe);
+	return -ENOMEM;
+cleanup_mutex_lock_probe:
+	unregister_kretprobe(&mutex_lock_probe);
+	return -ENOMEM;
+cleanup_mutex_unlock_probe:
+	unregister_kretprobe(&mutex_unlock_probe);
 	return -ENOMEM;
 }
 
@@ -621,6 +782,11 @@ static void tracer_exit(void)
 	// Unregister probes
 	unregister_kretprobe(&kmalloc_probe);
 	unregister_kretprobe(&kfree_probe);
+	unregister_kretprobe(&schedule_probe);
+	unregister_kretprobe(&up_probe);
+	unregister_kretprobe(&down_probe);
+	unregister_kretprobe(&mutex_lock_probe);
+	unregister_kretprobe(&mutex_unlock_probe);
 }
 
 module_init(tracer_init);
