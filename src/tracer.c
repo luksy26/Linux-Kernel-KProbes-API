@@ -307,6 +307,8 @@ static struct pid_data_hash *pid_data_hash_search(pid_t pid)
  * @brief Prints information about memory allocations for a given pid_data_hash entry.
  *
  * @param pdh Pointer to the pid_data_hash entry for which to print memory information.
+ *
+ * @note pr_info was used to debug, but the function can be adapted as per your requirements.
  */
 static void print_pid_mem(struct pid_data_hash *pdh)
 {
@@ -354,6 +356,7 @@ static void pid_data_purge_hash(void)
 struct reg_data {
 	struct pid_data_hash *pdh; /**< hashtable entry for current pid */
 	unsigned int size; /**< used by the kmalloc handlers */
+	int valid; /** flag used to indicate whether we should instrument*/
 };
 
 // Handler functions for kretprobes
@@ -363,16 +366,18 @@ static int kmalloc_probe_entry_handler(struct kretprobe_instance *p, struct pt_r
 	struct reg_data *data = (struct reg_data *)p->data;
 	struct pid_data_hash *pdh;
 
+	data->valid = 0;
+
 	// Blacklist the probe handler as we don't want recursive instrumentation
 	if (current->pid == current_module_pid) {
-		data->size = 0;
+		data->valid = -1;
 		return 0;
 	}
 
 	pdh = pid_data_hash_search(current->pid);
 	if (pdh == NULL) {
 		// Don't instrument anything, we are not tracking this process
-		data->size = 0;
+		data->valid = -1;
 		return 0;
 	}
 
@@ -387,7 +392,7 @@ static int kmalloc_probe_handler(struct kretprobe_instance *p, struct pt_regs *r
 	unsigned int address;
 	struct reg_data *data = (struct reg_data *)p->data;
 
-	if (data->size == 0)
+	if (data->valid == -1)
 		// entry_handler told us not to instrument this process
 		return 0;
 
@@ -398,7 +403,6 @@ static int kmalloc_probe_handler(struct kretprobe_instance *p, struct pt_regs *r
 	// Add an entry to the address-size memory hashtable
 	address = regs_return_value(regs);
 	mem_data_add(data->pdh, address, data->size);
-	pr_info("Allocating %u at address %u\n", data->size, address);
 	return 0;
 }
 
