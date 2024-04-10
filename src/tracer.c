@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0+
+
 #include <linux/module.h>
 #include <linux/kprobes.h>
 #include <linux/hashtable.h>
@@ -22,125 +24,203 @@ MODULE_LICENSE("GPL v2");
 #define MEM_HASH_SIZE 8
 #define TRACER_PROC_NAME "tracer"
 
-static char *hash_header = 
+/* The header used for displaying the /proc/tracer file with process statistics.
+ *
+ * This header string defines the column formatting for the /proc/tracer file,
+ * which shows statistics for various system calls and activities related to memory
+ * management, scheduling, and synchronization.
+ *
+ * The columns represent:
+ *   - PID: Process ID
+ *   - kmalloc: Number of kmalloc calls
+ *   - kfree: Number of kfree calls
+ *   - kmalloc_mem: Total memory allocated with kmalloc
+ *   - kfree_mem: Total memory freed with kfree
+ *   - sched: Number of scheduling events
+ *   - up: Number of times a process transitioned from unrunnable to runnable state
+ *   - down: Number of times a process transitioned from runnable to unrunnable state
+ *   - lock: Number of lock acquisition attempts
+ *   - unlock: Number of lock release operations
+ */
+static char *hash_header =
 	"PID   kmalloc kfree kmalloc_mem kfree_mem  sched   up     down  lock   unlock\n";
 
-DEFINE_RWLOCK(lock); /**< Spinlock for protecting hashtable operations */
+DEFINE_RWLOCK(pid_lock); /**< Spinlock for protecting pid hashtable operations */
+DEFINE_RWLOCK(mem_lock); /**< Spinlock for protecting mem hashtable operations */
+static struct proc_dir_entry
+	*proc_tracer; /**< The /proc entry used for tracking statistics */
 
-// The /proc entry used for tracking statistics
-static struct proc_dir_entry *proc_tracer;
+/**
+ * Used by handlers in order to not enter recursive traps
+ * - Initialized in tracer_ioctl
+ */
 static pid_t current_module_pid;
 
-/* hashtable structure for keeping address-size pairs
-
-	'address' is the key
-	'size' is the value
-*/
+/**
+ * struct mem_data - Structure for storing address-size pairs in a hash table
+ *
+ * This structure is usually stored as an entry within the 'stats->memory_dict'
+ * field (which is a hashtable) of a struct_pid_data_hash (see definition below)
+ */
 struct mem_data {
-	unsigned int address;
-	unsigned int size;
+	unsigned int address; /**< The memory address (key) */
+	unsigned int size; /**< The size of the memory block (value) */
 	struct hlist_node hnode;
 };
 
+/**
+ * @brief Allocates memory for a new mem_data structure.
+ *
+ * @param address The memory address for which to create a mem_data entry.
+ * @param size The size of the memory block associated with the address.
+ *
+ * @return A pointer to the newly allocated mem_data structure on success,
+ *         NULL on failure.
+ */
 static struct mem_data *mem_data_alloc(unsigned int address, unsigned int size)
 {
 	struct mem_data *md;
-	
-	/* This will be called from a kprobe handler, which run with interrupts disabled,
-	so GFK_KERNEL may lead to sleeping, which may lead to DEADLOCK. Therefore, we use
-	the GFP_ATOMIC flag (sacrifice performance for safety).
-	*/
+
+	/**
+	 * Usually called from a kretprobe handler routine, which runs with interrupts
+	 * disabled. Therefore, we use the GFP_ATOMIC flag in order to not yield the
+	 * CPU, sacrificing performance for safety
+	 */
 	md = kmalloc(sizeof(*md), GFP_ATOMIC);
 	if (md == NULL)
+		// Allocation failed, return NULL
 		return NULL;
+
 	md->address = address;
 	md->size = size;
+
 	return md;
 }
 
-/* structure for keeping pid statistics data
-	*_count: stores number of times their respective
-			 functions were called
-	kmalloc_total and kfree_total: amount of memory allocated/freed by
-								   kmalloc and kfree
-	memory_dict: hashtable for keeping address-size pairs
-				 following kmalloc calls (defined above)
-*/
+/**
+ * struct pid_stats_data - Structure for keeping process statistics data
+ *
+ * These statistics include:
+ *
+ * - Function call counts
+ * - Memory allocation/deallocation totals
+ * - Memory usage information
+ */
 struct pid_stats_data {
-    unsigned int kmalloc_count;
-    unsigned int kmalloc_total;
-	unsigned int kfree_count;
-	unsigned int kfree_total;
-	unsigned int sched_count;
-	unsigned int up_count;
-	unsigned int down_count;
-	unsigned int lock_count;
-	unsigned int unlock_count;
+	unsigned int kmalloc_count; /** < Number of times kmalloc was called */
+	unsigned int kmalloc_total; /** < Total memory allocated by kmalloc */
+	unsigned int kfree_count; /** < Number of times kfree was called */
+	unsigned int kfree_total; /** < Total memory freed by kfree */
+	unsigned int sched_count; /** < Number of scheduling events */
+	unsigned int up_count; /** < Number of semaphore release operations */
+	unsigned int down_count; /** < Number of semaphore acquisition attempts */
+	unsigned int lock_count; /** < Number of lock acquisition attempts */
+	unsigned int unlock_count; /** < Number of lock release operations */
 	DECLARE_HASHTABLE(memory_dict, MEM_HASH_SIZE);
+	/** Hash table for memory usage (key: address, value: struct mem_data) */
 };
 
-/* hashtable structure for keeping pid-stats pairs
-	'pid' is the key
-	'stats' is a pointer to the value (defined above)
-*/
+/**
+ * struct pid_data_hash - Structure for storing process ID (pid) and statistics pairs
+ *
+ * This structure is used to efficiently manage a hash table that maps process IDs (pids)
+ * to corresponding `pid_stats_data` structures. Each entry in the hash table is of this type.
+ */
 struct pid_data_hash {
-    pid_t pid;
-    struct pid_stats_data *stats;
-    struct hlist_node hnode;
+	pid_t pid; /** < The process ID (key) used for lookup in the hash table */
+	struct pid_stats_data *stats; /** Pointer to a 'struct pid_stats_data` */
+	struct hlist_node hnode;
 };
 
-static void mem_data_add(struct pid_data_hash *pdh, unsigned int address, unsigned int size)
+/**
+ * @brief Adds a new mem_data entry to the process's memory usage hash table.
+ *
+ * @param pdh Pointer to the pid_data_hash entry for the process.
+ * @param address The memory address for the new entry.
+ * @param size The size of the memory block at the given address.
+ */
+static void mem_data_add(struct pid_data_hash *pdh, unsigned int address,
+			 unsigned int size)
 {
 	struct mem_data *md;
-	
+
 	md = mem_data_alloc(address, size);
 	if (md == NULL)
+		// Allocation failed, return NULL
 		return;
-	write_lock(&lock);
+	write_lock(&mem_lock);
 	hash_add(pdh->stats->memory_dict, &md->hnode, address);
-	write_unlock(&lock);
+	write_unlock(&mem_lock);
 }
 
-static void mem_data_delete(struct pid_data_hash *pdh, unsigned int address)
+/**
+ * @brief Deletes a mem_data entry from the process's memory usage hash table.
+ *
+ * @param pdh Pointer to the pid_data_hash entry for the process.
+ * @param address The memory address of the entry to be deleted.
+ *
+ * @return Returns the size of the deleted memory block, or 0 if not found.
+ */
+static unsigned int mem_data_delete(struct pid_data_hash *pdh,
+				    unsigned int address)
 {
 	struct mem_data *md;
 	struct hlist_node *q;
+	unsigned int size = 0;
 
-	write_lock(&lock);
-	hash_for_each_possible_safe(pdh->stats->memory_dict, md, q, hnode, address) {
+	write_lock(&mem_lock);
+	hash_for_each_possible_safe(pdh->stats->memory_dict, md, q, hnode,
+				     address) {
 		if (md->address == address) {
 			hash_del(&md->hnode);
+			size = md->size;
 			kfree(md);
 			break;
 		}
 	}
-	write_unlock(&lock);
+	write_unlock(&mem_lock);
+	return size;
 }
 
+/**
+ * @brief Allocates and initializes a new pid_data_hash entry.
+ *
+ * @param pid The process ID (pid) for which to create the entry.
+ *
+ * @return Returns a pointer to the newly allocated pid_data_hash structure
+ *  on success, NULL on failure.
+ */
 static struct pid_data_hash *pid_data_hash_alloc(pid_t pid)
 {
 	struct pid_data_hash *pdh;
 
 	pdh = kmalloc(sizeof(*pdh), GFP_KERNEL);
 	if (pdh == NULL)
+		// Allocation failed, return NULL
 		return NULL;
 	pdh->pid = pid;
 	pdh->stats = kmalloc(sizeof(*(pdh->stats)), GFP_KERNEL);
-	pdh->stats->kmalloc_count = 0;
-	pdh->stats->kmalloc_total = 0;
-	pdh->stats->kfree_total = 0;
-	pdh->stats->kfree_count = 0;
-	pdh->stats->sched_count = 0;
-	pdh->stats->up_count = 0;
-	pdh->stats->down_count = 0;
-	pdh->stats->lock_count = 0;
-	pdh->stats->unlock_count = 0;
+	if (pdh->stats == NULL)
+		// Allocation failed, return NULL
+		return NULL;
+
+	// Initialize all integer fields in stats to 0
+	memset(pdh->stats, 0, sizeof(*(pdh->stats)));
+
+	// Initialize internal memory hashtable
 	hash_init(pdh->stats->memory_dict);
+
 	return pdh;
 }
 
 DECLARE_HASHTABLE(pid_dict, PROC_HASH_SIZE);
+/** Hash table for process statistics (key: pid, value: *struct pid_stats_data) */
 
+/**
+ * @brief Adds a new pid_data_hash entry for the specified process ID.
+ *
+ * @param pid The process ID (pid) for which to create a new entry.
+ */
 static void pid_data_hash_add(pid_t pid)
 {
 	struct pid_data_hash *pdh;
@@ -148,30 +228,47 @@ static void pid_data_hash_add(pid_t pid)
 	pdh = pid_data_hash_alloc(pid);
 	if (pdh == NULL)
 		return;
-	write_lock(&lock);
+	write_lock(&pid_lock);
 	hash_add(pid_dict, &pdh->hnode, pid);
-	write_unlock(&lock);
+	write_unlock(&pid_lock);
 }
 
+/**
+ * @brief Frees the memory associated with a pid_data_hash entry.
+ *
+ * @param pdh Pointer to the pid_data_hash entry to be freed.
+ */
 static void pid_data_hash_free(struct pid_data_hash *pdh)
 {
 	struct mem_data *md;
 	struct hlist_node *q;
 	unsigned int bucket;
+
+	// First, free the memory used by the internal hashtable in 'stats'
+	write_lock(&mem_lock);
 	hash_for_each_safe(pdh->stats->memory_dict, bucket, q, md, hnode) {
 		hash_del(&md->hnode);
 		kfree(md);
 	}
+	write_unlock(&mem_lock);
+	// Free the 'stats' field
 	kfree(pdh->stats);
+
+	// Free the actual entry
 	kfree(pdh);
 }
 
+/**
+ * @brief Deletes a pid_data_hash entry for the specified process ID.
+ *
+ * @param pid The process ID (pid) of the entry to be deleted.
+ */
 static void pid_data_hash_delete(pid_t pid)
 {
 	struct pid_data_hash *pdh;
 	struct hlist_node *q;
 
-	write_lock(&lock);
+	write_lock(&pid_lock);
 	hash_for_each_possible_safe(pid_dict, pdh, q, hnode, pid) {
 		if (pdh->pid == pid) {
 			hash_del(&pdh->hnode);
@@ -179,76 +276,121 @@ static void pid_data_hash_delete(pid_t pid)
 			break;
 		}
 	}
-	write_unlock(&lock);
+	write_unlock(&pid_lock);
 }
 
+/**
+ * @brief Searches for a pid_data_hash entry for the specified process ID.
+ *
+ * @param pid The process ID (pid) of the entry to be searched.
+ *
+ * @return A pointer to the found pid_data_hash entry on success, NULL if not found.
+ */
 static struct pid_data_hash *pid_data_hash_search(pid_t pid)
 {
 	struct pid_data_hash *pdh;
 	struct hlist_node *q;
 
-	read_lock(&lock);
+	read_lock(&pid_lock);
 	hash_for_each_possible_safe(pid_dict, pdh, q, hnode, pid) {
 		if (pdh->pid == pid) {
-			read_unlock(&lock);
+			read_unlock(&pid_lock);
 			return pdh;
 		}
 	}
-	read_unlock(&lock);
+	read_unlock(&pid_lock);
 	return NULL;
 }
 
+#pragma GCC diagnostic ignored "-Wunused-function"
+/**
+ * @brief Prints information about memory allocations for a given pid_data_hash entry.
+ *
+ * @param pdh Pointer to the pid_data_hash entry for which to print memory information.
+ */
+static void print_pid_mem(struct pid_data_hash *pdh)
+{
+	unsigned int bucket;
+	struct hlist_node *q;
+	struct mem_data *md;
+
+	pr_info("for PID %u:\n", pdh->pid);
+
+	read_lock(&mem_lock);
+	hash_for_each_safe(pdh->stats->memory_dict, bucket, q, md, hnode)
+		pr_info("At address %u, a block of size %u has been allocated\n",
+			md->address, md->size);
+	read_unlock(&mem_lock);
+
+	pr_info("\n");
+}
+
+/**
+ * @brief Purges all entries from the pid_data_hash table.
+ */
 static void pid_data_purge_hash(void)
 {
 	struct pid_data_hash *pdh;
 	struct hlist_node *q;
 	unsigned int bucket;
 
-	write_lock(&lock);
+	write_lock(&pid_lock);
 	hash_for_each_safe(pid_dict, bucket, q, pdh, hnode) {
 		hash_del(&pdh->hnode);
 		pid_data_hash_free(pdh);
 	}
-	write_unlock(&lock);
+	write_unlock(&pid_lock);
 }
 
-/* structure that acts as a data interface between 
-the entry and regular handler */
+/**
+ * struct reg_data: acts as a data interface between handlers
+ *
+ * Data is added to the appropriate fields in the entry_handler
+ * Data is extracted back in the regular handler
+ *
+ * This is done by casting the data field of the kprobe instance
+ * to this structure
+ */
 struct reg_data {
-	struct pid_data_hash *pdh;
-	unsigned int size;
+	struct pid_data_hash *pdh; /**< hashtable entry for current pid */
+	unsigned int address; /**< used by the kfree handlers */
+	unsigned int size; /**< used by the kmalloc handlers */
 };
 
 // Handler functions for kretprobes
 
-static int kmalloc_probe_entry_handler(struct kretprobe_instance *p, struct pt_regs *regs)
-{	
+static int kmalloc_probe_entry_handler(struct kretprobe_instance *p,
+				       struct pt_regs *regs)
+{
 	struct reg_data *data = (struct reg_data *)p->data;
 	struct pid_data_hash *pdh;
-	
-	// blacklist the probe handler
+
+	// blacklist the probe handler as we don't want recursive instrumentation
 	if (current->pid == current_module_pid) {
-		data->size = -1;
+		data->size = 0;
 		return 0;
 	}
 
 	pdh = pid_data_hash_search(current->pid);
 	if (pdh == NULL) {
 		// don't instrument anything, we are not tracking this process
-		data->size = -1;
+		data->size = 0;
 		return 0;
 	}
-	data->size = regs->ax;
+
+	// data to be passed to the regular handler
+	data->size = regs->ax; /** the argument received by kmalloc */
 	data->pdh = pdh;
 	return 0;
 }
 
-static int kmalloc_probe_handler(struct kretprobe_instance *p, struct pt_regs *regs)
-{	
+static int kmalloc_probe_handler(struct kretprobe_instance *p,
+				 struct pt_regs *regs)
+{
 	unsigned int address;
 	struct reg_data *data = (struct reg_data *)p->data;
 
-	if (data->size == -1)
+	if (data->size == 0)
 		// entry_handler told us not to instrument this process
 		return 0;
 
@@ -256,28 +398,95 @@ static int kmalloc_probe_handler(struct kretprobe_instance *p, struct pt_regs *r
 	++data->pdh->stats->kmalloc_count;
 	data->pdh->stats->kmalloc_total += data->size;
 
-	// add an entry to the address-size dictionary 
+	// add an entry to the address-size memory hashtable
 	address = regs_return_value(regs);
-	// we are in atomic context and should be careful when we allocate memory
 	mem_data_add(data->pdh, address, data->size);
 
 	return 0;
 }
 
+static int kfree_probe_entry_handler(struct kretprobe_instance *p,
+				     struct pt_regs *regs)
+{
+	struct reg_data *data = (struct reg_data *)p->data;
+	struct pid_data_hash *pdh;
+
+	// blacklist the probe handler as we don't want recursive instrumentation
+	if (current->pid == current_module_pid) {
+		data->address = 0;
+		return 0;
+	}
+
+	pdh = pid_data_hash_search(current->pid);
+	if (pdh == NULL) {
+		// don't instrument anything, we are not tracking this process
+		data->address = 0;
+		return 0;
+	}
+	data->address = regs->ax;
+	data->pdh = pdh;
+	return 0;
+}
+
+static int kfree_probe_handler(struct kretprobe_instance *p,
+			       struct pt_regs *regs)
+{
+	struct reg_data *data = (struct reg_data *)p->data;
+	unsigned int size;
+
+	if (data->address == 0)
+		// entry_handler told us not to instrument this process
+		return 0;
+
+	// increase the kfree call count
+	++data->pdh->stats->kfree_count;
+
+	/* remove the address-size entry in the pid's
+	 * memory hashtable (as it's been freed)
+	 */
+	size = mem_data_delete(data->pdh, data->address);
+	// increase the amount of freed memory for current pid
+	data->pdh->stats->kfree_total += size;
+	return 0;
+}
+
+// Blacklist the handlers so we don't run into recursive traps
+NOKPROBE_SYMBOL(kmalloc_probe_entry_handler);
+NOKPROBE_SYMBOL(kmalloc_probe_handler);
+NOKPROBE_SYMBOL(kfree_probe_entry_handler);
+NOKPROBE_SYMBOL(kfree_probe_handler);
+
 // Define kretprobes
 static struct kretprobe kmalloc_probe = {
-    .kp = {
-        .symbol_name = "__kmalloc",
-    },
-    .entry_handler = kmalloc_probe_entry_handler,
-    .handler = kmalloc_probe_handler,
+	.kp = {
+		.symbol_name = "__kmalloc",
+	},
+	.entry_handler = kmalloc_probe_entry_handler,
+	.handler = kmalloc_probe_handler,
 	.data_size = sizeof(struct reg_data),
 	.maxactive = MAX_PROBES,
 };
 
-// IOCTL function
+static struct kretprobe kfree_probe = {
+	.kp = {
+		.symbol_name = "kfree",
+	},
+	.entry_handler = kfree_probe_entry_handler,
+	.handler = kfree_probe_handler,
+	.data_size = sizeof(struct reg_data),
+	.maxactive = MAX_PROBES,
+};
+
+/**
+ * @brief IOCTL function
+ *
+ * @param cmd The type of request made to the monitoring subsystem
+ * @param arg The PID of the process to be traced/untraced
+ *
+ * @return 0 on success, -EINVAL for invalid arguments
+ */
 static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{	
+{
 	current_module_pid = current->pid;
 	switch (cmd) {
 	case TRACER_ADD_PROCESS:
@@ -296,6 +505,7 @@ static long tracer_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 // Define file operations for /dev/tracer
 static const struct file_operations tracer_fops = {
+	.owner = THIS_MODULE,
 	.unlocked_ioctl = tracer_ioctl,
 };
 
@@ -306,31 +516,31 @@ static struct miscdevice tracer_dev = {
 	.fops = &tracer_fops,
 };
 
-// Procfs file function
+/**
+ * @brief Prints data to the /proc/tracer file
+ *
+ * @param m The file to print in
+ */
 static int proc_tracer_show(struct seq_file *m, void *v)
 {
-    struct pid_data_hash *pdh;
+	struct pid_data_hash *pdh;
 	struct hlist_node *q;
 	unsigned int bucket;
-	
+
 	seq_printf(m, "%s", hash_header);
-	read_lock(&lock);
-    hash_for_each_safe(pid_dict, bucket, q, pdh, hnode) {
+	read_lock(&pid_lock);
+	hash_for_each_safe(pid_dict, bucket, q, pdh, hnode) {
 		// we make sure the data sits nicely and is alligned in its column
-        seq_printf(m, "%-5u %-7u %-5u %-11u %-10u %-7u %-6u %-5u %-6u %-6u\n",
-			pdh->pid,
-			pdh->stats->kmalloc_count,
-			pdh->stats->kfree_count,
-			pdh->stats->kmalloc_total,
-			pdh->stats->kfree_total,
-			pdh->stats->sched_count,
-			pdh->stats->up_count,
-			pdh->stats->down_count,
-			pdh->stats->lock_count,
-			pdh->stats->unlock_count
-		);
+		seq_printf(
+			m,
+			"%-5u %-7u %-5u %-11u %-10u %-7u %-6u %-5u %-6u %-6u\n",
+			pdh->pid, pdh->stats->kmalloc_count,
+			pdh->stats->kfree_count, pdh->stats->kmalloc_total,
+			pdh->stats->kfree_total, pdh->stats->sched_count,
+			pdh->stats->up_count, pdh->stats->down_count,
+			pdh->stats->lock_count, pdh->stats->unlock_count);
 	}
-	read_unlock(&lock);
+	read_unlock(&pid_lock);
 	return 0;
 }
 
@@ -349,8 +559,8 @@ static int tracer_init(void)
 {
 	int ret;
 
-    // initialize pid hash table
-    hash_init(pid_dict);
+	// Initialize pid hashtable
+	hash_init(pid_dict);
 
 	// Register device
 	ret = misc_register(&tracer_dev);
@@ -365,26 +575,36 @@ static int tracer_init(void)
 		pr_err("failed to create /proc/tracer\n");
 		goto cleanup_proc_create;
 	}
-	// register kretprobes
+
+	// Register kretprobes
 
 	ret = register_kretprobe(&kmalloc_probe);
-    if (ret) {
-        pr_err("register_kretprobe kmalloc failed\n");
-        goto cleanup_kmalloc_probe;
-    }
+	if (ret) {
+		pr_err("register_kretprobe kmalloc failed\n");
+		goto cleanup_kmalloc_probe;
+	}
+
+	ret = register_kretprobe(&kfree_probe);
+	if (ret) {
+		pr_err("register_kretprobe kfree failed\n");
+		goto cleanup_kfree_probe;
+	}
 
 	return 0;
 
 // Cleanup after errors
 cleanup_misc_register:
 	misc_deregister(&tracer_dev);
-	return ENOMEM;
+	return -ENOMEM;
 cleanup_proc_create:
 	proc_remove(proc_tracer);
-	return ENOMEM;
+	return -ENOMEM;
 cleanup_kmalloc_probe:
 	unregister_kretprobe(&kmalloc_probe);
-	return ENOMEM;
+	return -ENOMEM;
+cleanup_kfree_probe:
+	unregister_kretprobe(&kfree_probe);
+	return -ENOMEM;
 }
 
 static void tracer_exit(void)
@@ -400,6 +620,7 @@ static void tracer_exit(void)
 
 	// Unregister probes
 	unregister_kretprobe(&kmalloc_probe);
+	unregister_kretprobe(&kfree_probe);
 }
 
 module_init(tracer_init);
